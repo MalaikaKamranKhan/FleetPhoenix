@@ -230,6 +230,33 @@ def bad_job_list_flagged(w):
         w.metrics(list_refused=refused, problems_named=flagged, jobs_added=len(w.e.jobs) - before)
 
 
+def sole_tractor_auto_repair(w):
+    """T2 is the only irrigator. Break it and touch nothing: the field tech must save the day."""
+    w.act('start')
+    w.tick(4)
+    done = w.job('J2')['done']
+    w.act('fail', tractor='T2')
+    queued = w.job('J2')['assigned'] is None          # nobody else can irrigate
+    w.run(lambda e: all(j['done'] >= j['total'] for j in e.jobs))
+    repaired = any('FIELD TECH: Titan 02 repaired' in ev['message'] for ev in w.e.events)
+    return queued and repaired and w.all_done() and w.clean() and w.job('J2')['done'] >= done, \
+        w.metrics(full_day=True, no_backup_existed=queued, field_tech_fixed_it=repaired)
+
+
+def unconfirmed_signal_loss(w):
+    """Judge cuts T2's signal and walks away. The job stays reserved, then telemetry returns."""
+    w.act('start')
+    w.tick(4)
+    done = w.job('J2')['done']
+    w.act('disconnect', tractor='T2')
+    w.tick(4)
+    held = w.job('J2')['assigned'] == 'T2' and w.job('J2')['done'] == done   # reserved while unknown
+    w.run(lambda e: all(j['done'] >= j['total'] for j in e.jobs))
+    returned = any('SIGNAL RESTORED: Titan 02' in ev['message'] for ev in w.e.events)
+    return held and returned and w.all_done() and w.clean(), \
+        w.metrics(full_day=True, held_while_unknown=held, signal_returned=returned)
+
+
 SCENARIOS = [
     ('S1', 'Normal day: 5 jobs, 4 tractors', normal_day),
     ('S2', 'Tractor breaks mid-job', breakdown_mid_job),
@@ -243,6 +270,8 @@ SCENARIOS = [
     ('S10', 'Guard blocks a restart below the checkpoint', checkpoint_guard),
     ('S11', 'Operator job list: 3 jobs planned and finished', operator_job_list),
     ('S12', 'Job list with a missing deadline is flagged, not guessed', bad_job_list_flagged),
+    ('S13', 'Only irrigator breaks, nobody presses repair: day completes', sole_tractor_auto_repair),
+    ('S14', 'Lost signal never confirmed: telemetry returns, day completes', unconfirmed_signal_loss),
 ]
 
 
