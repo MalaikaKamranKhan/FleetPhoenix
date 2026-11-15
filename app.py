@@ -15,6 +15,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 from agent_mesh import AgentMesh
+from scenarios import run_suite
 
 BASE = Path(__file__).resolve().parent
 PORT = int(os.environ.get('FLEET_PORT', '5000'))
@@ -49,6 +50,7 @@ class FleetEngine:
             self.reserve = max(0, min(self.MAX_RESERVE, int(self.agents.memory.preference('battery_reserve', 0))))
         except (TypeError, ValueError):
             self.reserve = 0
+        self.tests = None                 # last live test-board run, kept across resets
         self.reset()
 
     def log(self, kind, message):
@@ -156,6 +158,14 @@ class FleetEngine:
             self.plan()
 
     def action(self, op, payload):
+        if op == 'run_tests':
+            # Runs on fresh throwaway engines, so it does not touch (or lock) the live farm.
+            results = run_suite(type(self))
+            with self.lock:
+                self.tests = results
+                self.log('success' if results['passed'] == results['total'] else 'alert',
+                         f"Live test suite: {results['passed']} of {results['total']} scenarios passed in {results['ms']} ms.")
+            return f"{results['passed']} of {results['total']} scenarios passed."
         with self.lock:
             tid = str(payload.get('tractor', ''))
             t = self.tractor(tid)
@@ -330,7 +340,7 @@ class FleetEngine:
             return {
                 'minute': self.minute, 'paused': self.paused, 'tractors': [dict(t) for t in self.tractors],
                 'jobs': jobs, 'events': list(self.events[:24]), 'recoveries': self.recoveries,
-                'reserve': self.reserve,
+                'reserve': self.reserve, 'tests': self.tests,
                 'metrics': {'completed_units': done, 'total_units': total,
                             'percent': round(100 * done / total) if total else 0,
                             'jobs_done': sum(j['status'] == 'completed' for j in jobs),

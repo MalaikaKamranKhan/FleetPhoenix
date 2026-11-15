@@ -278,5 +278,24 @@ class ReserveAndCheckpointTests(unittest.TestCase):
         self.assertEqual(self.e.snapshot()['metrics']['violations'], 0)
 
 
+class LiveTestBoardTests(unittest.TestCase):
+    def test_every_scenario_on_the_board_passes(self):
+        from scenarios import run_suite
+        r = run_suite(FleetEngine)
+        failed = [(x['id'], x['metrics']) for x in r['results'] if not x['passed']]
+        self.assertEqual(failed, [])
+        self.assertEqual(r['total'], 10)
+
+    def test_board_run_does_not_touch_the_live_farm(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            e = FleetEngine(runtime_dir=tmp)
+            before = [(j['id'], j['done'], j['assigned']) for j in e.jobs]
+            msg = e.action('run_tests', {})
+            self.assertIn('10 of 10', msg)
+            self.assertEqual([(j['id'], j['done'], j['assigned']) for j in e.jobs], before)
+            self.assertEqual(e.snapshot()['tests']['passed'], 10)
+            e.agents.pool.shutdown(wait=False)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

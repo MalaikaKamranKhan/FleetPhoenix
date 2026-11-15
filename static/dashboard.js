@@ -34,7 +34,17 @@ function render(s){
  const llm=a.llm; $('#llmStatus').textContent=llm.configured?(llm.model+' · '+llm.status):'OFF (optional)';
  $('#advisorText').textContent=llm.advice;
  $('#askAdvisor').disabled=(!llm.configured||llm.pending);
+ renderTests(s.tests);
  $('#events').innerHTML=s.events.map(e=>`<div class="event"><span class="eventmark ${esc(e.kind)}"></span><span class="eventtime">${esc(e.time)}</span><div class="eventtext">${esc(e.message)}</div></div>`).join('');
+}
+let testsShown=null;
+function renderTests(t){
+ if(!t||t===testsShown||JSON.stringify(t)===JSON.stringify(testsShown))return;testsShown=t;
+ const all=t.passed===t.total;
+ $('#testScore').textContent=`${t.passed} / ${t.total} PASSED · ${t.ms} MS`;
+ $('#testScore').className='section-chip '+(all?'mint':'red');
+ const label=k=>k.replace(/_/g,' ');
+ $('#testBoard').innerHTML=t.results.map(r=>`<div class="testrow ${r.passed?'':'fail'}"><span class="tid">${esc(r.id)}</span><span class="tname">${esc(r.name)}</span><span class="tres">${r.passed?'PASS':'FAIL'}</span><span class="tmetrics">${Object.entries(r.metrics).map(([k,v])=>`${esc(label(k))} <b>${esc(v)}</b>`).join(' · ')}</span></div>`).join('');
 }
 async function refresh(){try{render(await readState())}catch(e){$('#liveStatus').textContent='DISCONNECTED'}}
 async function control(action){try{const x=await sendAction(action);toast(x.message);render(x.state)}catch(e){toast(e.message,true)}}
@@ -42,6 +52,7 @@ async function control(action){try{const x=await sendAction(action);toast(x.mess
  $('#pauseButton').addEventListener('click',async()=>{const s=await readState();control(s.paused?'start':'pause')});
  $('#resetButton').addEventListener('click',()=>{if(confirm('Reset tractor states, jobs, and event log?'))control('reset')});
  $('#askAdvisor').addEventListener('click',()=>control('ask_advisor'));
+ $('#runTests').addEventListener('click',async e=>{const b=e.currentTarget;b.disabled=true;b.textContent='Running…';try{const x=await sendAction('run_tests');toast(x.message);render(x.state)}catch(err){toast(err.message,true)}finally{b.disabled=false;b.textContent='▶ Run all scenarios'}});
  $('#faultButton').addEventListener('click',async()=>{try{const x=await sendAction('fault',{agent:'Planner'});toast(x.message);render(x.state)}catch(e){toast(e.message,true)}});
  await refresh();setInterval(refresh,1100);
 })();
