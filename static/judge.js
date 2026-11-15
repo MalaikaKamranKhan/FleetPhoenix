@@ -2,7 +2,7 @@
 const j$=s=>document.querySelector(s);
 let current=null;
 function b(label,style,op,tid,disabled=false){return `<button class="btn ${style}" data-op="${op}" data-tid="${tid}" ${disabled?'disabled':''}>${label}</button>`}
-function show(s){current=s;j$('#phoneState').textContent=`${s.paused?'PAUSED':'RUNNING'} · T+${s.minute} simulated minutes · ${s.metrics.jobs_done}/${s.metrics.jobs_total} jobs completed · ${s.metrics.violations} constraint violations`;
+function show(s){current=s;const o=s.agent_mesh.orchestration||{};j$('#breakAI').textContent=(o.faults&&o.faults.Planner)?'✓ Restore the AI':'🧠 Break the AI';if(document.activeElement!==j$('#reserveInput')&&s.reserve!==undefined)j$('#reserveInput').value=s.reserve;j$('#phoneState').textContent=`${s.paused?'PAUSED':'RUNNING'} · T+${s.minute} simulated minutes · ${s.metrics.jobs_done}/${s.metrics.jobs_total} jobs completed · ${s.metrics.violations} constraint violations`;
  j$('#judgeExplain').textContent=s.explanation;
  j$('#judgeTractors').innerHTML=s.tractors.map(t=>{
  let buttons='';
@@ -17,6 +17,8 @@ async function run(op,params={}){try{const x=await sendAction(op,params);toast(x
 j$('#judgeTractors').addEventListener('click',e=>{const target=e.target.closest('button[data-op]');if(!target)return;const op=target.dataset.op;run(op,{tractor:target.dataset.tid})});
 j$('#start').addEventListener('click',()=>run('start'));
 j$('#pause').addEventListener('click',()=>run('pause'));
+j$('#breakAI').addEventListener('click',()=>run('fault',{agent:'Planner'}));
+j$('#reserveForm').addEventListener('submit',e=>{e.preventDefault();run('set_reserve',{reserve:j$('#reserveInput').value})});
 j$('#reset').addEventListener('click',()=>{if(confirm('Reset the entire simulated farm?'))run('reset')});
 j$('#addJob').addEventListener('submit',e=>{e.preventDefault();const form=new FormData(e.target);const payload=Object.fromEntries(form.entries());run('create_job',payload)});
 update();setInterval(update,1200);

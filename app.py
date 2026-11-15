@@ -39,9 +39,16 @@ class FleetEngine:
     IMPLEMENTS = {'plow', 'seed', 'harvest', 'irrigate'}
     FIELDS = {'North Ridge', 'East Orchard', 'West Terrace'}
 
-    def __init__(self):
+    MAX_RESERVE = 40
+
+    def __init__(self, runtime_dir=None):
         self.lock = threading.RLock()
-        self.agents = AgentMesh(self, BASE / 'runtime' / 'agent_memory.jsonl')
+        self.agents = AgentMesh(self, Path(runtime_dir or BASE / 'runtime') / 'agent_memory.jsonl')
+        # Operator battery reserve (%), remembered across resets and restarts by the Memory agent.
+        try:
+            self.reserve = max(0, min(self.MAX_RESERVE, int(self.agents.memory.preference('battery_reserve', 0))))
+        except (TypeError, ValueError):
+            self.reserve = 0
         self.reset()
 
     def log(self, kind, message):
@@ -54,6 +61,8 @@ class FleetEngine:
 
     def reset(self):
         with self.lock:
+            self.agents.reset_protocol()
+            self.run = secrets.token_hex(3)   # scopes Memory checkpoints to this run
             self.minute = 0
             self.paused = True
             self.serial = 0
@@ -95,10 +104,14 @@ class FleetEngine:
     def battery_cost(job):
         return (job['total'] - job['done']) * 1.15 + 8
 
+    def battery_ok(self, tractor, job):
+        # Must finish the job and still hold the operator's reserve.
+        return tractor['battery'] - self.battery_cost(job) >= self.reserve
+
     def eligible(self, tractor, job):
         return (tractor['status'] == 'idle' and tractor['job'] is None
                 and job['implement'] in tractor['implements']
-                and tractor['battery'] >= self.battery_cost(job))
+                and self.battery_ok(tractor, job))
 
     def plan(self):
         # Agentic handoff: Planner proposes; Guard alone commits simulated work.
@@ -248,6 +261,25 @@ class FleetEngine:
                 self.log('success', f"{t['name']} charged to 95% and returned to service.")
                 self.plan()
                 return f'{t["name"]} recharged.'
+            if op == 'set_reserve':
+                try:
+                    reserve = int(payload.get('reserve'))
+                except (TypeError, ValueError):
+                    raise ValueError('Battery reserve must be a whole number.')
+                if not 0 <= reserve <= self.MAX_RESERVE:
+                    raise ValueError(f'Battery reserve must be 0–{self.MAX_RESERVE}%.')
+                self.reserve = reserve
+                saved = self.agents.memory.save_preference('battery_reserve', reserve)
+                self.agents.send('Operator', 'Memory', 'preference.saved', {'battery_reserve': reserve, 'persisted': saved})
+                self.log('system', f'OPERATOR RULE: keep at least {reserve}% battery after every new assignment.'
+                         + (' Remembered across resets.' if saved else ' Applies to this session only.'))
+                self.plan()
+                return f'Battery reserve set to {reserve}%. Applies to new assignments.'
+            if op == 'fault':
+                # Demo control: break the Planner agent (or one Tractor agent) to show the fallback.
+                result = self.agents.set_fault(str(payload.get('agent', 'Planner')), payload.get('on'), payload.get('mode'))
+                self.plan()
+                return result
             if op == 'ask_advisor':
                 ok, message = self.agents.request_llm()
                 if not ok:
@@ -298,6 +330,7 @@ class FleetEngine:
             return {
                 'minute': self.minute, 'paused': self.paused, 'tractors': [dict(t) for t in self.tractors],
                 'jobs': jobs, 'events': list(self.events[:24]), 'recoveries': self.recoveries,
+                'reserve': self.reserve,
                 'metrics': {'completed_units': done, 'total_units': total,
                             'percent': round(100 * done / total) if total else 0,
                             'jobs_done': sum(j['status'] == 'completed' for j in jobs),
@@ -317,7 +350,11 @@ class FleetEngine:
             return 'A tractor is offline. No active assignment is duplicated; the fleet continues with confirmed-available equipment.'
         if blocked:
             names = ', '.join(j['name'] for j in blocked[:2])
-            return f'No eligible idle tractor currently has the equipment and battery needed for {names}. The work remains queued.'
+            battery = f'battery (keeping the {self.reserve}% reserve)' if self.reserve else 'battery'
+            queued = f'No eligible idle tractor currently has the equipment and {battery} needed for {names}. The work remains queued.'
+            return f'{self.agents.last_explanation} {queued}' if self.agents.last_explanation else queued
+        if self.agents.last_explanation:
+            return self.agents.last_explanation
         if self.recoveries:
             return 'Recovery is active: completed work is retained, unfinished work is reassigned only to compatible tractors, and the event log records why.'
         return 'Initial plan respects implement compatibility, available energy, task dependencies, and job deadlines.'
