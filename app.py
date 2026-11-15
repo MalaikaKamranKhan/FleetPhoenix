@@ -2,6 +2,7 @@
 Requires Python 3.10+ and qrcode[pil] only to render the judge QR code.
 No connection to real tractors, farm machinery, actuators, or navigation systems.
 """
+import errno
 import io
 import json
 import os
@@ -431,7 +432,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/api/state':
             return self.send_json(engine.snapshot())
         if path in ('/api/trace', '/api/info', '/qr.png') and self.client_address[0] not in ('127.0.0.1', '::1'):
-            return self.send_bytes(b'Open this dashboard on the host laptop at http://localhost:5000', 'text/plain', 403)
+            return self.send_bytes(f'Open this dashboard on the host laptop at http://localhost:{PORT}'.encode(), 'text/plain', 403)
         if path == '/api/trace':
             return self.send_json({'events':engine.snapshot()['events'],
                                    'agent_messages':engine.agents.snapshot()['messages'],
@@ -491,7 +492,28 @@ def clock():
         engine.tick()
 
 
+def bind_server(tries=10):
+    """Claim FLEET_PORT, or the next free port if it is taken (on macOS, AirPlay Receiver holds 5000)."""
+    global PORT
+    first = PORT
+    for port in range(first, first + tries + 1):
+        try:
+            server = ThreadingHTTPServer(('0.0.0.0', port), Handler)
+        except OSError as exc:
+            if exc.errno in (errno.EADDRINUSE, errno.EACCES):
+                continue
+            raise
+        if port != first:
+            print(f'\n  Port {first} is already in use on this computer (on a Mac, usually AirPlay Receiver).'
+                  f'\n  Using port {port} instead. The links below already point to it.')
+        PORT = port
+        return server
+    raise SystemExit(f'No free port between {first} and {first + tries}. '
+                     'Start with a free one, for example: FLEET_PORT=5055 python3 app.py')
+
+
 def main():
+    server = bind_server()
     threading.Thread(target=clock, name='simulation-clock', daemon=True).start()
     print('\n' + '=' * 65)
     print('  FLEETPHOENIX — AGRICULTURAL RESILIENCE SIMULATOR')
@@ -502,7 +524,7 @@ def main():
     print('  Start simulation from the phone controller or laptop toolbar.')
     print('  Both devices must be on the same reachable Wi-Fi network.')
     print('  Ctrl+C to stop. This is a SIMULATION — never real tractor control.\n')
-    ThreadingHTTPServer(('0.0.0.0', PORT), Handler).serve_forever()
+    server.serve_forever()
 
 
 if __name__ == '__main__':
