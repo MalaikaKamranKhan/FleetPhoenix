@@ -10,7 +10,7 @@ An interactive, **multi-agent orchestration** proof of concept for Track 2, with
 - An **LLM advisor** supporting a bring-your-own OpenAI-compatible chat-completions endpoint. It analyzes tradeoffs but never executes machine actions or changes safety rules.
 - Judge-controlled **6-minute delayed telemetry**, signal loss, safe-stop confirmation, breakdown, battery failure, and new-operator-job scenarios.
 
-**Important integration boundary:** AgOpenWeb is an actual, separately installed open-source guidance app. We link to it at `http://localhost:5174` when installed, but this prototype does **not** claim a working AgOpenWeb API integration. See `AGOPENWEB_INTEGRATION.md` for a truthful adapter plan.
+**AgOpenWeb integration boundary:** AgOpenWeb is an actual, separately installed open-source guidance app. FleetPhoenix feeds it **read-only simulated GPS for one tractor** (standard NMEA over UDP 9999), so the official guidance view shows that tractor working, and switches to the replacement after a breakdown. It sends **no commands** to AgOpenWeb. Setup and the exact scope are in `AGOPENWEB_INTEGRATION.md`.
 
 **Laptop shows:** four tractors, field coverage, operator jobs, time-stamped decisions, explanation, compatibility/energy/dependency checks, and live QR code.
 

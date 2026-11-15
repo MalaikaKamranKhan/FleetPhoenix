@@ -1,4 +1,5 @@
 """Core engine invariants. Run: python test_engine.py"""
+import json
 import tempfile
 import unittest
 from agent_mesh import TractorAgent
@@ -347,6 +348,114 @@ class AutoRecoveryTests(unittest.TestCase):
         self.run_minutes(FleetEngine.FIELD_TECH_MIN + 2)               # stale timer must not fire twice
         self.assertIn(self.e.tractor('T2')['status'], ('idle', 'working'))
         self.assertTrue(self.complete())
+
+
+class AgOpenWebFeedTests(unittest.TestCase):
+    """The GPS feed is tested with a fake UDP sender; nothing goes on the network."""
+    def setUp(self):
+        from agopenweb_bridge import AgOpenWebBridge
+        self.tmp = tempfile.TemporaryDirectory()
+        self.e = FleetEngine(runtime_dir=self.tmp.name)
+        self.sent = []
+        self.b = AgOpenWebBridge(self.e, send=self.sent.append, detect=lambda: True, env={})
+        self.e.bridge = self.b
+
+    def tearDown(self):
+        self.e.agents.pool.shutdown(wait=False)
+        self.tmp.cleanup()
+
+    def frames(self, n, start=100.0):
+        out = None
+        for k in range(n):
+            out = self.b.step(start + k * 0.25)
+        return out
+
+    def test_sentences_are_valid_nmea_inside_the_plot(self):
+        from agopenweb_bridge import BOUNDARY, LAT0, LON0, M_PER_DEG_LAT, M_PER_DEG_LON
+        payload = self.frames(2)
+        gga, vtg = payload.strip().split('\r\n')
+        for line in (gga, vtg):
+            body, checksum = line[1:].split('*')
+            calc = 0
+            for ch in body:
+                calc ^= ord(ch)
+            self.assertEqual(checksum, f'{calc:02X}')
+        f = gga.split(',')
+        lat = int(f[2][:2]) + float(f[2][2:]) / 60
+        lon = -(int(f[4][:3]) + float(f[4][3:]) / 60)
+        east, north = (lon - LON0) * M_PER_DEG_LON, (lat - LAT0) * M_PER_DEG_LAT
+        self.assertTrue(BOUNDARY[0] <= east <= BOUNDARY[1] and BOUNDARY[2] <= north <= BOUNDARY[3])
+        self.assertEqual((f[3], f[5], f[6]), ('N', 'W', '4'))
+        self.assertTrue(vtg.startswith('$GPVTG,'))
+
+    def test_auto_follow_switches_to_the_tractor_that_takes_over(self):
+        self.e.action('start', {})
+        for _ in range(6):
+            self.e.tick()
+        first = self.e.job_by_id('J1')['assigned']
+        self.frames(2)
+        self.assertEqual(self.b.feeding, first)
+        self.e.action('fail', {'tractor': first})
+        self.frames(1, start=200)
+        self.assertEqual(self.b.feeding, self.e.job_by_id('J1')['assigned'])
+        self.assertNotEqual(self.b.feeding, first)
+
+    def test_auto_follow_stays_with_the_work_after_the_first_job(self):
+        self.e.action('start', {})
+        self.frames(1)
+        first = self.b.feeding
+        for k in range(30):                      # J1 (24 units) finishes; its tractor moves on to J4
+            self.e.tick()
+            self.b.step(150 + k)
+        self.assertEqual(self.e.job_by_id('J1')['done'], 24)
+        planter = self.e.job_by_id('J4')['assigned']            # plowing done -> planting starts
+        self.assertIsNotNone(planter)
+        self.assertEqual(self.b.feeding, planter)
+        self.assertNotEqual(first, None)
+        self.e.action('fail', {'tractor': planter})              # break the planter mid-job
+        self.b.step(400)
+        holder = self.e.job_by_id('J4')['assigned']
+        self.assertEqual(self.b.feeding, holder or planter)      # successor, or the stopped tractor
+
+    def test_reset_starts_the_feed_fresh(self):
+        self.e.action('start', {})
+        for _ in range(6):
+            self.e.tick()
+        self.frames(1)
+        self.e.action('fail', {'tractor': self.b.feeding})
+        self.frames(1, start=200)
+        self.e.action('reset', {})
+        self.assertEqual(self.b.positions, {})
+        self.frames(1, start=300)
+        self.assertEqual(self.b.feeding, self.e.job_by_id('J1')['assigned'])
+
+    def test_silent_tractor_sends_no_gps(self):
+        self.b.set_follow('T2')
+        self.assertIsNotNone(self.frames(1))
+        self.e.action('disconnect', {'tractor': 'T2'})
+        before = len(self.sent)
+        self.assertIsNone(self.frames(4, start=300))
+        self.assertEqual(len(self.sent), before)
+        self.assertEqual(self.e.snapshot()['agopenweb']['state'], 'signal_lost')
+
+    def test_waits_quietly_when_agopenweb_is_not_running(self):
+        from agopenweb_bridge import AgOpenWebBridge
+        b = AgOpenWebBridge(self.e, send=self.sent.append, detect=lambda: False, env={})
+        self.assertIsNone(b.step(1.0))
+        self.assertEqual(b.status()['state'], 'waiting')
+        self.assertEqual(self.sent, [])
+
+    def test_follow_choice_is_validated_and_logged(self):
+        msg = self.e.action('agopenweb_follow', {'tractor': 'T3'})
+        self.assertIn('Titan 03', msg)
+        with self.assertRaises(ValueError):
+            self.e.action('agopenweb_follow', {'tractor': 'T9'})
+
+    def test_setup_script_writes_an_isolated_profile(self):
+        from agopenweb_setup import write_profile
+        root = write_profile(self.tmp.name)
+        self.assertFalse(json.loads((root / 'appsettings.json').read_text())['simulatorEnabled'])
+        self.assertIn('-391,181,0', (root / 'Fields' / 'FleetPhoenix Farm' / 'Boundary.txt').read_text())
 
 
 class LiveTestBoardTests(unittest.TestCase):
