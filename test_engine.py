@@ -278,6 +278,77 @@ class ReserveAndCheckpointTests(unittest.TestCase):
         self.assertEqual(self.e.snapshot()['metrics']['violations'], 0)
 
 
+class AutoRecoveryTests(unittest.TestCase):
+    """A judge's sabotage must never dead-end the demo, and reserved work is never released early."""
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.e = FleetEngine(runtime_dir=self.tmp.name)
+        self.e.action('start', {})
+        for _ in range(4):
+            self.e.tick()
+
+    def tearDown(self):
+        self.e.agents.pool.shutdown(wait=False)
+        self.tmp.cleanup()
+
+    def run_minutes(self, n):
+        for _ in range(n):
+            self.e.tick()
+
+    def complete(self, limit=400):
+        for _ in range(limit):
+            if all(j['done'] >= j['total'] for j in self.e.jobs):
+                return True
+            self.e.tick()
+        return all(j['done'] >= j['total'] for j in self.e.jobs)
+
+    def test_lost_signal_returns_on_its_own_without_releasing_the_job(self):
+        t = self.e.tractor('T2')
+        done = self.e.job_by_id('J2')['done']
+        self.e.action('disconnect', {'tractor': 'T2'})
+        self.run_minutes(4)
+        self.assertEqual(t['status'], 'offline')                       # still unknown: held, not released
+        self.assertEqual(self.e.job_by_id('J2')['assigned'], 'T2')
+        self.assertEqual(self.e.job_by_id('J2')['done'], done)
+        self.run_minutes(FleetEngine.SIGNAL_BACK_MIN)
+        self.assertEqual(t['status'], 'working')                       # same tractor, same job
+        self.assertEqual(t['job'], 'J2')
+        self.assertTrue(self.complete())
+        self.assertEqual(self.e.snapshot()['metrics']['violations'], 0)
+
+    def test_sole_implement_breakdown_is_repaired_and_day_completes(self):
+        self.e.action('fail', {'tractor': 'T2'})                       # the only irrigator
+        self.assertIsNone(self.e.job_by_id('J2')['assigned'])
+        self.run_minutes(FleetEngine.FIELD_TECH_MIN + 1)
+        self.assertNotEqual(self.e.tractor('T2')['status'], 'failed')
+        self.assertTrue(self.complete())
+        self.assertEqual(self.e.snapshot()['metrics']['violations'], 0)
+
+    def test_drained_battery_recharges_and_day_completes(self):
+        self.e.action('drain', {'tractor': 'T3'})                      # the only harvester
+        self.run_minutes(FleetEngine.CHARGE_MIN + 1)
+        t = self.e.tractor('T3')
+        self.assertNotEqual(t['status'], 'charging')
+        self.assertGreaterEqual(t['battery'], 90)
+        self.assertTrue(self.complete())
+
+    def test_confirmed_stop_is_repaired_by_the_field_tech(self):
+        self.e.action('disconnect', {'tractor': 'T4'})
+        self.e.action('confirm_stop', {'tractor': 'T4'})
+        self.assertEqual(self.e.tractor('T4')['status'], 'quarantined')
+        self.run_minutes(FleetEngine.FIELD_TECH_MIN + 1)
+        self.assertIn(self.e.tractor('T4')['status'], ('idle', 'working'))
+        self.assertTrue(self.complete())
+
+    def test_manual_repair_still_works_and_beats_the_timer(self):
+        self.e.action('fail', {'tractor': 'T2'})
+        self.e.action('restore', {'tractor': 'T2'})                    # judge presses Repair at once
+        self.assertIn(self.e.tractor('T2')['status'], ('idle', 'working'))  # replanned straight back to work
+        self.run_minutes(FleetEngine.FIELD_TECH_MIN + 2)               # stale timer must not fire twice
+        self.assertIn(self.e.tractor('T2')['status'], ('idle', 'working'))
+        self.assertTrue(self.complete())
+
+
 class LiveTestBoardTests(unittest.TestCase):
     def test_every_scenario_on_the_board_passes(self):
         from scenarios import SCENARIOS, run_suite
