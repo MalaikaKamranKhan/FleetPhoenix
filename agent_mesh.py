@@ -264,11 +264,15 @@ class ConstraintGuard:
             if j is None:
                 violations.append({'rule': 'unknown_job', 'detail': f"job {p['job']} does not exist"})
                 continue
-            if p['tractor'] in tractors or p['job'] in jobs or j['assigned'] is not None or t['job'] is not None:
-                violations.append({'rule': 'double_lease', 'detail': f"{p['job']} or {p['tractor']} would hold two leases"})
-            elif j['implement'] not in t['implements']:
+            if j['implement'] not in t['implements']:
                 violations.append({'rule': 'implement', 'tractor': p['tractor'],
                                    'detail': f"{t['name']} has no {j['implement']} implement for {p['job']}"})
+            elif p['tractor'] in tractors or p['job'] in jobs or j['assigned'] is not None or t['job'] is not None:
+                holder = j['assigned'] or next((q['tractor'] for q in proposals if q['job'] == p['job'] and q is not p), None)
+                violations.append({'rule': 'double_lease', 'detail': (
+                    f"{t['name']} is already working on {t['job']}" if t['job'] else
+                    f"{p['job']} is already held by {holder}" if holder else
+                    f"{p['tractor']} would hold two jobs")})
             elif not farm.ready(j) or j['done'] >= j['total']:
                 violations.append({'rule': 'dependency', 'detail': f"{p['job']} is blocked or already complete"})
             elif (saved := farm.agents.memory.saved_progress(getattr(farm, 'run', None), j['id'])) is not None and j['done'] < saved:
