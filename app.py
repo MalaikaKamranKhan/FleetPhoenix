@@ -17,6 +17,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 from agent_mesh import AgentMesh
 from scenarios import run_suite
+from agopenweb_bridge import AgOpenWebBridge
 
 BASE = Path(__file__).resolve().parent
 PORT = int(os.environ.get('FLEET_PORT', '5000'))
@@ -71,6 +72,8 @@ class FleetEngine:
     def reset(self):
         with self.lock:
             self.agents.reset_protocol()
+            if getattr(self, 'bridge', None):
+                self.bridge.reset()
             self.run = secrets.token_hex(3)   # scopes Memory checkpoints to this run
             self.minute = 0
             self.paused = True
@@ -131,6 +134,7 @@ class FleetEngine:
             if self.paused:
                 return
             self.minute += 1
+            self.last_tick_at = time.monotonic()   # lets the AgOpenWeb feed animate between ticks
             for t in self.tractors:
                 if t['status'] == 'offline' and t.get('delay_until') is not None and self.minute >= t['delay_until']:
                     # Simulated heartbeat returns; previously-held lease is still valid.
@@ -324,6 +328,13 @@ class FleetEngine:
                 self.log('system', f"OPERATOR JOB LIST accepted: {len(parsed)} jobs ({', '.join(ids.values())}). Sent to the tractors for bids.")
                 self.plan()
                 return f"{len(parsed)} jobs added: {', '.join(ids.values())}."
+            if op == 'agopenweb_follow':
+                if not getattr(self, 'bridge', None):
+                    raise ValueError('The AgOpenWeb feed is not running.')
+                follow = self.bridge.set_follow(payload.get('tractor', 'auto'))
+                label = 'whichever tractor works Prepare North Ridge' if follow == 'auto' else self.tractor(follow)['name']
+                self.log('system', f'AgOpenWeb guidance view now follows {label}.')
+                return f'AgOpenWeb follows {label}.'
             if op == 'set_reserve':
                 try:
                     reserve = int(payload.get('reserve'))
@@ -394,6 +405,7 @@ class FleetEngine:
                 'minute': self.minute, 'paused': self.paused, 'tractors': [dict(t) for t in self.tractors],
                 'jobs': jobs, 'events': list(self.events[:24]), 'recoveries': self.recoveries,
                 'reserve': self.reserve, 'tests': self.tests,
+                'agopenweb': self.bridge.status() if getattr(self, 'bridge', None) else None,
                 'metrics': {'completed_units': done, 'total_units': total,
                             'percent': round(100 * done / total) if total else 0,
                             'jobs_done': sum(j['status'] == 'completed' for j in jobs),
@@ -547,6 +559,8 @@ def bind_server(tries=10):
 def main():
     server = bind_server()
     threading.Thread(target=clock, name='simulation-clock', daemon=True).start()
+    engine.bridge = AgOpenWebBridge(engine)   # read-only GPS feed; idles until AgOpenWeb is found
+    engine.bridge.start()
     print('\n' + '=' * 65)
     print('  FLEETPHOENIX — AGRICULTURAL RESILIENCE SIMULATOR')
     print('=' * 65)
@@ -555,6 +569,8 @@ def main():
     print(f'  Judge link     : http://{local_ip()}:{PORT}/judge?t={ACCESS_TOKEN}')
     print('  Start simulation from the phone controller or laptop toolbar.')
     print('  Both devices must be on the same reachable Wi-Fi network.')
+    b = engine.bridge
+    print(f'  AgOpenWeb feed : {"OFF (FLEET_AGOPENWEB=off)" if not b.enabled else "simulated GPS to " + b.target[0] + ":" + str(b.target[1]) + " once AgOpenWeb is found at " + b.url}')
     print('  Ctrl+C to stop. This is a SIMULATION — never real tractor control.\n')
     server.serve_forever()
 

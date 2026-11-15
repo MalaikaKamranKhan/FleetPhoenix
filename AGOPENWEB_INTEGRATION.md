@@ -1,7 +1,20 @@
 # AgOpenWeb integration: honest scope and next technical steps
 
 ## Current status
-This standalone FleetPhoenix prototype is a working **fleet agent orchestration simulator**, **not** a modified AgOpenWeb build. The official AgOpenWeb app can run separately at `http://localhost:5174`, and the FleetPhoenix dashboard links to that URL. We **have not verified** a stable external HTTP or WebSocket API for commanding simulated tractor operations in the current AgOpenWeb release. Do not say the two applications are connected during judging unless you build and validate that bridge.
+This standalone FleetPhoenix prototype is a working **fleet agent orchestration simulator**, **not** a modified AgOpenWeb build.
+
+**What is connected (built and verified with AgOpenWeb 26.7.6 on macOS):** a **read-only GPS feed**. `agopenweb_bridge.py` sends standard NMEA GPS sentences (`$GPGGA` position, `$GPVTG` course and speed, checksummed) for **one** simulated FleetPhoenix tractor to AgOpenWeb on UDP 9999, four times a second. With AgOpenWeb's own simulator switched off, AgOpenWeb reports *RTK Fixed* and draws that tractor driving its passes over the "FleetPhoenix Farm" field. By default the feed follows the work: it starts on the tractor plowing North Ridge, switches to whichever tractor takes over a job after a breakdown, and moves on to the follow-up job when one finishes. If the followed tractor loses signal, FleetPhoenix stops sending, and AgOpenWeb shows "GPS data lost".
+
+**What is not connected:** FleetPhoenix sends **no commands** to AgOpenWeb (no steering, sections, jobs or settings), and reads nothing back from it. AgOpenWeb shows one vehicle at a time. We have not found or used any official AgOpenWeb command API. When judging, say "FleetPhoenix feeds simulated GPS for one tractor into the official AgOpenWeb guidance view", not "FleetPhoenix controls AgOpenWeb".
+
+### Run it
+1. Create a dedicated AgOpenWeb profile (it switches AgOpenWeb's simulator off and adds the field; your normal AgOpenWeb settings are untouched):
+   `python3 agopenweb_setup.py agopenweb-data`
+2. Start AgOpenWeb with that profile. macOS: `AGOPENWEB_DATA="$PWD/agopenweb-data" /Applications/AgOpenWeb.app/Contents/MacOS/AgOpenWeb.Desktop --headless`. Windows: set the `AGOPENWEB_DATA` environment variable to that folder and start AgOpenWeb.
+3. Open `http://localhost:5174`, then **Field Operations → Fields and Jobs → FleetPhoenix Farm → Open Field Only**.
+4. Start FleetPhoenix (`python3 app.py`). The banner shows the AgOpenWeb feed line, and the dashboard footer shows "sending simulated GPS for …" once AgOpenWeb is found. Use **Show in AgOpenWeb** to pick a tractor, or leave it on Auto.
+
+Settings: `FLEET_AGOPENWEB=off` disables the feed; `FLEET_AGOPENWEB_URL` and `FLEET_AGOPENWEB_UDP` change where it looks and sends. The simulation runs 60 times faster than real time, so the reported speed is scaled down to a real-world equivalent.
 
 Upstream: https://github.com/AgOpenGPS-Official/AgOpenWeb
 Releases: https://github.com/AgOpenGPS-Official/AgOpenWeb/releases

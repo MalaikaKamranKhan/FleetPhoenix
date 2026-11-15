@@ -35,6 +35,13 @@ function render(s){
  $('#advisorText').textContent=llm.advice;
  $('#askAdvisor').disabled=(!llm.configured||llm.pending);
  renderTests(s.tests);
+ const g=s.agopenweb;
+ if(g){
+  $('#aowStatus').textContent=g.state==='sending'?`sending simulated GPS for ${g.feeding} (${g.fixes_sent} fixes)`:
+   g.state==='signal_lost'?`${g.feeding} has no signal, so no GPS is sent (AgOpenWeb shows "GPS data lost")`:
+   g.state==='waiting'?'waiting for AgOpenWeb at localhost:5174':'off';
+  if(document.activeElement!==$('#aowFollow'))$('#aowFollow').value=g.follow;
+ }else{$('#aowStatus').textContent='not running in this process';}
  $('#events').innerHTML=s.events.map(e=>`<div class="event"><span class="eventmark ${esc(e.kind)}"></span><span class="eventtime">${esc(e.time)}</span><div class="eventtext">${esc(e.message)}</div></div>`).join('');
 }
 let testsShown=null;
@@ -58,6 +65,7 @@ async function control(action){try{const x=await sendAction(action);toast(x.mess
  $('#sampleJobs').addEventListener('click',()=>{$('#jobList').value=SAMPLE});
  $('#badSample').addEventListener('click',()=>{$('#jobList').value=BAD});
  $('#submitJobs').addEventListener('click',async()=>{try{const x=await sendAction('submit_jobs',{csv:$('#jobList').value});toast(x.message);render(x.state)}catch(e){toast(e.message,true);refresh()}});
+ $('#aowFollow').addEventListener('change',async e=>{try{const x=await sendAction('agopenweb_follow',{tractor:e.target.value});toast(x.message);render(x.state)}catch(err){toast(err.message,true)}});
  $('#runTests').addEventListener('click',async e=>{const b=e.currentTarget;b.disabled=true;b.textContent='Running…';try{const x=await sendAction('run_tests');toast(x.message);render(x.state)}catch(err){toast(err.message,true)}finally{b.disabled=false;b.textContent='▶ Run all scenarios'}});
  $('#faultButton').addEventListener('click',async()=>{try{const x=await sendAction('fault',{agent:'Planner'});toast(x.message);render(x.state)}catch(e){toast(e.message,true)}});
  await refresh();setInterval(refresh,1100);
