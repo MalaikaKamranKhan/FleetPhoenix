@@ -2,6 +2,7 @@
 Requires Python 3.10+ and qrcode[pil] only to render the judge QR code.
 No connection to real tractors, farm machinery, actuators, or navigation systems.
 """
+import errno
 import io
 import json
 import os
@@ -15,6 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 from agent_mesh import AgentMesh
+from scenarios import run_suite
 
 BASE = Path(__file__).resolve().parent
 PORT = int(os.environ.get('FLEET_PORT', '5000'))
@@ -39,9 +41,17 @@ class FleetEngine:
     IMPLEMENTS = {'plow', 'seed', 'harvest', 'irrigate'}
     FIELDS = {'North Ridge', 'East Orchard', 'West Terrace'}
 
-    def __init__(self):
+    MAX_RESERVE = 40
+
+    def __init__(self, runtime_dir=None):
         self.lock = threading.RLock()
-        self.agents = AgentMesh(self, BASE / 'runtime' / 'agent_memory.jsonl')
+        self.agents = AgentMesh(self, Path(runtime_dir or BASE / 'runtime') / 'agent_memory.jsonl')
+        # Operator battery reserve (%), remembered across resets and restarts by the Memory agent.
+        try:
+            self.reserve = max(0, min(self.MAX_RESERVE, int(self.agents.memory.preference('battery_reserve', 0))))
+        except (TypeError, ValueError):
+            self.reserve = 0
+        self.tests = None                 # last live test-board run, kept across resets
         self.reset()
 
     def log(self, kind, message):
@@ -54,6 +64,8 @@ class FleetEngine:
 
     def reset(self):
         with self.lock:
+            self.agents.reset_protocol()
+            self.run = secrets.token_hex(3)   # scopes Memory checkpoints to this run
             self.minute = 0
             self.paused = True
             self.serial = 0
@@ -95,10 +107,14 @@ class FleetEngine:
     def battery_cost(job):
         return (job['total'] - job['done']) * 1.15 + 8
 
+    def battery_ok(self, tractor, job):
+        # Must finish the job and still hold the operator's reserve.
+        return tractor['battery'] - self.battery_cost(job) >= self.reserve
+
     def eligible(self, tractor, job):
         return (tractor['status'] == 'idle' and tractor['job'] is None
                 and job['implement'] in tractor['implements']
-                and tractor['battery'] >= self.battery_cost(job))
+                and self.battery_ok(tractor, job))
 
     def plan(self):
         # Agentic handoff: Planner proposes; Guard alone commits simulated work.
@@ -143,6 +159,14 @@ class FleetEngine:
             self.plan()
 
     def action(self, op, payload):
+        if op == 'run_tests':
+            # Runs on fresh throwaway engines, so it does not touch (or lock) the live farm.
+            results = run_suite(type(self))
+            with self.lock:
+                self.tests = results
+                self.log('success' if results['passed'] == results['total'] else 'alert',
+                         f"Live test suite: {results['passed']} of {results['total']} scenarios passed in {results['ms']} ms.")
+            return f"{results['passed']} of {results['total']} scenarios passed."
         with self.lock:
             tid = str(payload.get('tractor', ''))
             t = self.tractor(tid)
@@ -248,6 +272,45 @@ class FleetEngine:
                 self.log('success', f"{t['name']} charged to 95% and returned to service.")
                 self.plan()
                 return f'{t["name"]} recharged.'
+            if op == 'submit_jobs':
+                # Operator job list: the Intake agent parses it; any problem rejects the whole list.
+                text = str(payload.get('csv', ''))
+                self.agents.send('Operator', 'Intake', 'joblist.submitted', {'chars': len(text)})
+                parsed, issues = self.agents.intake.parse(self, text)
+                if issues:
+                    self.agents.send('Intake', 'Orchestrator', 'joblist.rejected', {'issues': issues[:3]})
+                    self.log('alert', 'INTAKE FLAGGED the job list and applied nothing (no values were guessed): ' + ' '.join(issues[:3]))
+                    raise ValueError('Job list not accepted. ' + ' '.join(issues[:4]))
+                first = max(int(j['id'][1:]) for j in self.jobs) + 1
+                ids = {j['name'].lower(): f'J{first + k}' for k, j in enumerate(parsed)}
+                for j in parsed:
+                    dep = j['depends']
+                    dep_id = (dep if self.job_by_id(dep) else ids.get(dep.lower())) if dep else None
+                    self.jobs.append(self.job(ids[j['name'].lower()], j['name'], j['field'], j['implement'],
+                                              j['units'], j['deadline'], j['priority'], dep_id))
+                self.agents.send('Intake', 'Orchestrator', 'joblist.parsed', {'jobs': list(ids.values())})
+                self.log('system', f"OPERATOR JOB LIST accepted: {len(parsed)} jobs ({', '.join(ids.values())}). Sent to the tractors for bids.")
+                self.plan()
+                return f"{len(parsed)} jobs added: {', '.join(ids.values())}."
+            if op == 'set_reserve':
+                try:
+                    reserve = int(payload.get('reserve'))
+                except (TypeError, ValueError):
+                    raise ValueError('Battery reserve must be a whole number.')
+                if not 0 <= reserve <= self.MAX_RESERVE:
+                    raise ValueError(f'Battery reserve must be 0–{self.MAX_RESERVE}%.')
+                self.reserve = reserve
+                saved = self.agents.memory.save_preference('battery_reserve', reserve)
+                self.agents.send('Operator', 'Memory', 'preference.saved', {'battery_reserve': reserve, 'persisted': saved})
+                self.log('system', f'OPERATOR RULE: keep at least {reserve}% battery after every new assignment.'
+                         + (' Remembered across resets.' if saved else ' Applies to this session only.'))
+                self.plan()
+                return f'Battery reserve set to {reserve}%. Applies to new assignments.'
+            if op == 'fault':
+                # Demo control: break the Planner agent (or one Tractor agent) to show the fallback.
+                result = self.agents.set_fault(str(payload.get('agent', 'Planner')), payload.get('on'), payload.get('mode'))
+                self.plan()
+                return result
             if op == 'ask_advisor':
                 ok, message = self.agents.request_llm()
                 if not ok:
@@ -298,6 +361,7 @@ class FleetEngine:
             return {
                 'minute': self.minute, 'paused': self.paused, 'tractors': [dict(t) for t in self.tractors],
                 'jobs': jobs, 'events': list(self.events[:24]), 'recoveries': self.recoveries,
+                'reserve': self.reserve, 'tests': self.tests,
                 'metrics': {'completed_units': done, 'total_units': total,
                             'percent': round(100 * done / total) if total else 0,
                             'jobs_done': sum(j['status'] == 'completed' for j in jobs),
@@ -317,7 +381,11 @@ class FleetEngine:
             return 'A tractor is offline. No active assignment is duplicated; the fleet continues with confirmed-available equipment.'
         if blocked:
             names = ', '.join(j['name'] for j in blocked[:2])
-            return f'No eligible idle tractor currently has the equipment and battery needed for {names}. The work remains queued.'
+            battery = f'battery (keeping the {self.reserve}% reserve)' if self.reserve else 'battery'
+            queued = f'No eligible idle tractor currently has the equipment and {battery} needed for {names}. The work remains queued.'
+            return f'{self.agents.last_explanation} {queued}' if self.agents.last_explanation else queued
+        if self.agents.last_explanation:
+            return self.agents.last_explanation
         if self.recoveries:
             return 'Recovery is active: completed work is retained, unfinished work is reassigned only to compatible tractors, and the event log records why.'
         return 'Initial plan respects implement compatibility, available energy, task dependencies, and job deadlines.'
@@ -364,7 +432,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/api/state':
             return self.send_json(engine.snapshot())
         if path in ('/api/trace', '/api/info', '/qr.png') and self.client_address[0] not in ('127.0.0.1', '::1'):
-            return self.send_bytes(b'Open this dashboard on the host laptop at http://localhost:5000', 'text/plain', 403)
+            return self.send_bytes(f'Open this dashboard on the host laptop at http://localhost:{PORT}'.encode(), 'text/plain', 403)
         if path == '/api/trace':
             return self.send_json({'events':engine.snapshot()['events'],
                                    'agent_messages':engine.agents.snapshot()['messages'],
@@ -424,7 +492,28 @@ def clock():
         engine.tick()
 
 
+def bind_server(tries=10):
+    """Claim FLEET_PORT, or the next free port if it is taken (on macOS, AirPlay Receiver holds 5000)."""
+    global PORT
+    first = PORT
+    for port in range(first, first + tries + 1):
+        try:
+            server = ThreadingHTTPServer(('0.0.0.0', port), Handler)
+        except OSError as exc:
+            if exc.errno in (errno.EADDRINUSE, errno.EACCES):
+                continue
+            raise
+        if port != first:
+            print(f'\n  Port {first} is already in use on this computer (on a Mac, usually AirPlay Receiver).'
+                  f'\n  Using port {port} instead. The links below already point to it.')
+        PORT = port
+        return server
+    raise SystemExit(f'No free port between {first} and {first + tries}. '
+                     'Start with a free one, for example: FLEET_PORT=5055 python3 app.py')
+
+
 def main():
+    server = bind_server()
     threading.Thread(target=clock, name='simulation-clock', daemon=True).start()
     print('\n' + '=' * 65)
     print('  FLEETPHOENIX — AGRICULTURAL RESILIENCE SIMULATOR')
@@ -435,7 +524,7 @@ def main():
     print('  Start simulation from the phone controller or laptop toolbar.')
     print('  Both devices must be on the same reachable Wi-Fi network.')
     print('  Ctrl+C to stop. This is a SIMULATION — never real tractor control.\n')
-    ThreadingHTTPServer(('0.0.0.0', PORT), Handler).serve_forever()
+    server.serve_forever()
 
 
 if __name__ == '__main__':
