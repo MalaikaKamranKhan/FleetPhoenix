@@ -52,6 +52,12 @@ async function control(action){try{const x=await sendAction(action);toast(x.mess
  $('#pauseButton').addEventListener('click',async()=>{const s=await readState();control(s.paused?'start':'pause')});
  $('#resetButton').addEventListener('click',()=>{if(confirm('Reset tractor states, jobs, and event log?'))control('reset')});
  $('#askAdvisor').addEventListener('click',()=>control('ask_advisor'));
+ const SAMPLE='name,field,implement,units,deadline,priority,depends\nPlow West Terrace,West Terrace,plow,12,120,2,\nSeed West Terrace,West Terrace,seed,10,170,2,Plow West Terrace\nIrrigate North Ridge,North Ridge,irrigate,15,160,1,';
+ const BAD='name,field,implement,units,deadline,priority,depends\nPlow West Terrace,West Terrace,plow,12,,2,\nSpray East Orchard,East Orchard,spray,10,150,2,';
+ $('#jobList').value=SAMPLE;
+ $('#sampleJobs').addEventListener('click',()=>{$('#jobList').value=SAMPLE});
+ $('#badSample').addEventListener('click',()=>{$('#jobList').value=BAD});
+ $('#submitJobs').addEventListener('click',async()=>{try{const x=await sendAction('submit_jobs',{csv:$('#jobList').value});toast(x.message);render(x.state)}catch(e){toast(e.message,true);refresh()}});
  $('#runTests').addEventListener('click',async e=>{const b=e.currentTarget;b.disabled=true;b.textContent='Running…';try{const x=await sendAction('run_tests');toast(x.message);render(x.state)}catch(err){toast(err.message,true)}finally{b.disabled=false;b.textContent='▶ Run all scenarios'}});
  $('#faultButton').addEventListener('click',async()=>{try{const x=await sendAction('fault',{agent:'Planner'});toast(x.message);render(x.state)}catch(e){toast(e.message,true)}});
  await refresh();setInterval(refresh,1100);

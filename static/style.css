@@ -20,3 +20,7 @@
 .testrow.fail .tres{background:#4a1f22;color:var(--red)}
 .testrow .tmetrics{grid-column:2/4;font-size:11px;color:var(--muted)}
 .testrow .tmetrics b{color:var(--sub);font-weight:700}
+.joblist{width:100%;box-sizing:border-box;background:#0b1719;color:var(--ink);border:1px solid var(--line);border-radius:10px;padding:10px 12px;font:12.5px/1.5 ui-monospace,Menlo,Consolas,monospace;resize:vertical}
+.joblist:focus{outline:2px solid var(--teal);outline-offset:1px}
+.joblist-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.joblist-help{margin-top:9px;font-size:11px;color:var(--muted);line-height:1.45}

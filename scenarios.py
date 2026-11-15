@@ -195,6 +195,41 @@ def checkpoint_guard(w):
     return blocked and w.clean(), w.metrics(checkpoint_units=saved, restart_below_checkpoint_blocked=blocked)
 
 
+JOB_LIST = """name,field,implement,units,deadline,priority,depends
+Plow West Terrace,West Terrace,plow,12,120,2,
+Seed West Terrace,West Terrace,seed,10,170,2,Plow West Terrace
+Irrigate North Ridge,North Ridge,irrigate,15,160,1,"""
+
+BAD_JOB_LIST = """name,field,implement,units,deadline,priority,depends
+Plow West Terrace,West Terrace,plow,12,,2,
+Spray East Orchard,East Orchard,spray,10,150,2,"""
+
+
+def operator_job_list(w):
+    w.act('submit_jobs', csv=JOB_LIST)
+    new = w.e.jobs[5:]
+    seed = next(j for j in new if j['implement'] == 'seed')
+    dep_ok = seed['depends'] == next(j for j in new if j['implement'] == 'plow')['id']
+    w.act('start')
+    w.run(lambda e: all(j['done'] >= j['total'] for j in e.jobs))
+    seed_after_plow = w.finished.get(seed['depends'], 10**9) <= w.finished.get(seed['id'], -1)
+    return len(new) == 3 and dep_ok and seed_after_plow and w.all_done() and w.clean(), \
+        w.metrics(full_day=True, jobs_submitted=len(new), dependency_kept=seed_after_plow)
+
+
+def bad_job_list_flagged(w):
+    before = len(w.e.jobs)
+    try:
+        w.act('submit_jobs', csv=BAD_JOB_LIST)
+        refused, reason = False, ''
+    except ValueError as exc:
+        refused, reason = True, str(exc)
+    flagged = 'missing deadline' in reason and 'unknown implement' in reason
+    nothing_applied = len(w.e.jobs) == before
+    return refused and flagged and nothing_applied and w.clean(), \
+        w.metrics(list_refused=refused, problems_named=flagged, jobs_added=len(w.e.jobs) - before)
+
+
 SCENARIOS = [
     ('S1', 'Normal day: 5 jobs, 4 tractors', normal_day),
     ('S2', 'Tractor breaks mid-job', breakdown_mid_job),
@@ -206,6 +241,8 @@ SCENARIOS = [
     ('S8', 'Surprise job while its only tractor is busy', surprise_job_no_double_booking),
     ('S9', 'Dependent job waits for its prerequisite', dependency_order),
     ('S10', 'Guard blocks a restart below the checkpoint', checkpoint_guard),
+    ('S11', 'Operator job list: 3 jobs planned and finished', operator_job_list),
+    ('S12', 'Job list with a missing deadline is flagged, not guessed', bad_job_list_flagged),
 ]
 
 

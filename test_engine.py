@@ -280,21 +280,70 @@ class ReserveAndCheckpointTests(unittest.TestCase):
 
 class LiveTestBoardTests(unittest.TestCase):
     def test_every_scenario_on_the_board_passes(self):
-        from scenarios import run_suite
+        from scenarios import SCENARIOS, run_suite
         r = run_suite(FleetEngine)
         failed = [(x['id'], x['metrics']) for x in r['results'] if not x['passed']]
         self.assertEqual(failed, [])
-        self.assertEqual(r['total'], 10)
+        self.assertEqual(r['total'], len(SCENARIOS))
 
     def test_board_run_does_not_touch_the_live_farm(self):
         with tempfile.TemporaryDirectory() as tmp:
             e = FleetEngine(runtime_dir=tmp)
             before = [(j['id'], j['done'], j['assigned']) for j in e.jobs]
+            from scenarios import SCENARIOS
+            n = len(SCENARIOS)
             msg = e.action('run_tests', {})
-            self.assertIn('10 of 10', msg)
+            self.assertIn(f'{n} of {n}', msg)
             self.assertEqual([(j['id'], j['done'], j['assigned']) for j in e.jobs], before)
-            self.assertEqual(e.snapshot()['tests']['passed'], 10)
+            self.assertEqual(e.snapshot()['tests']['passed'], n)
             e.agents.pool.shutdown(wait=False)
+
+
+class JobListTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.e = FleetEngine(runtime_dir=self.tmp.name)
+
+    def tearDown(self):
+        self.e.agents.pool.shutdown(wait=False)
+        self.tmp.cleanup()
+
+    def submit(self, csv):
+        return self.e.action('submit_jobs', {'csv': csv})
+
+    def test_valid_list_adds_jobs_with_dependency_and_plans_them(self):
+        from scenarios import JOB_LIST
+        msg = self.submit(JOB_LIST)
+        self.assertIn('3 jobs added: J6, J7, J8', msg)
+        self.assertEqual(self.e.job_by_id('J7')['depends'], 'J6')
+        self.assertIsNotNone(self.e.job_by_id('J6')['assigned'])      # an idle plow tractor takes it
+        self.assertIsNone(self.e.job_by_id('J7')['assigned'])         # waits for the plowing
+        self.assertTrue(any(m['sender'] == 'Intake' for m in self.e.agents.messages))
+        self.assertEqual(self.e.snapshot()['metrics']['violations'], 0)
+
+    def test_any_bad_line_rejects_the_whole_list(self):
+        from scenarios import BAD_JOB_LIST
+        with self.assertRaises(ValueError) as ctx:
+            self.submit(BAD_JOB_LIST)
+        self.assertIn('Line 2 (Plow West Terrace): missing deadline', str(ctx.exception))
+        self.assertIn('unknown implement "spray"', str(ctx.exception))
+        self.assertEqual(len(self.e.jobs), 5)
+
+    def test_unknown_dependency_and_bad_header_are_flagged(self):
+        with self.assertRaises(ValueError) as ctx:
+            self.submit('name,field,implement,units,deadline,priority,depends\nX,North Ridge,seed,5,90,2,J99')
+        self.assertIn('depends on "J99"', str(ctx.exception))
+        with self.assertRaises(ValueError) as ctx:
+            self.submit('name,field,units\nX,North Ridge,5')
+        self.assertIn('missing: implement, deadline, priority', str(ctx.exception))
+        self.assertEqual(len(self.e.jobs), 5)
+
+    def test_names_are_case_insensitive_and_duplicates_refused(self):
+        self.submit('name,field,implement,units,deadline,priority\nA,north ridge,SEED,5,90,2')
+        self.assertEqual(self.e.job_by_id('J6')['field'], 'North Ridge')
+        self.assertEqual(self.e.job_by_id('J6')['implement'], 'seed')
+        with self.assertRaises(ValueError):
+            self.submit('name,field,implement,units,deadline,priority\nA,North Ridge,seed,5,90,2')
 
 
 if __name__ == '__main__':

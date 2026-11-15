@@ -154,6 +154,71 @@ class MemoryAgent:
         return hits[-limit:]
 
 
+class IntakeAgent:
+    """Turns an operator's job list (CSV text) into structured jobs. Flags problems; never guesses.
+    LLM swap point: free text or a voice transcript could be parsed here into the same shape."""
+    name = 'Intake'
+    COLUMNS = ('name', 'field', 'implement', 'units', 'deadline', 'priority')
+    MAX_JOBS = 15
+    RANGES = (('units', 1, 60), ('deadline', 10, 240), ('priority', 1, 3))
+
+    def parse(self, farm, text):
+        lines = [l for l in str(text).strip().splitlines() if l.strip()]
+        if len(lines) < 2:
+            return [], ['The job list needs a header line and at least one job.']
+        head = [h.strip().lower() for h in lines[0].split(',')]
+        missing = [c for c in self.COLUMNS if c not in head]
+        if missing:
+            return [], [f"The header is missing: {', '.join(missing)}."]
+        if len(lines) - 1 > self.MAX_JOBS:
+            return [], [f'At most {self.MAX_JOBS} jobs per list.']
+        fields = {f.lower(): f for f in farm.FIELDS}
+        existing = {j['name'].lower() for j in farm.jobs}
+        jobs, issues, names = [], [], set()
+        for n, line in enumerate(lines[1:], start=2):
+            cells = [c.strip() for c in line.split(',')]
+            row = {h: (cells[i] if i < len(cells) else '') for i, h in enumerate(head)}
+            name = row.get('name', '')[:56]
+            errs = []
+            if not name:
+                errs.append('missing name')
+            elif name.lower() in names or name.lower() in existing:
+                errs.append('a job with this name already exists')
+            field = fields.get(row.get('field', '').lower())
+            if not field:
+                errs.append(f"unknown field \"{row.get('field', '')}\" (use {', '.join(sorted(farm.FIELDS))})")
+            implement = row.get('implement', '').lower()
+            if implement not in farm.IMPLEMENTS:
+                errs.append(f"unknown implement \"{row.get('implement', '')}\" (use {', '.join(sorted(farm.IMPLEMENTS))})")
+            nums = {}
+            for key, lo, hi in self.RANGES:
+                raw = row.get(key, '')
+                if raw == '':
+                    errs.append(f'missing {key}')
+                    continue
+                try:
+                    value = int(raw)
+                except ValueError:
+                    errs.append(f'{key} "{raw}" is not a whole number')
+                    continue
+                if not lo <= value <= hi:
+                    errs.append(f'{key} must be {lo} to {hi}')
+                elif key == 'deadline' and value <= farm.minute:
+                    errs.append(f'deadline T+{value}m has already passed')
+                nums[key] = value
+            if errs:
+                issues.append(f"Line {n}{' (' + name + ')' if name else ''}: {'; '.join(errs)}.")
+            else:
+                names.add(name.lower())
+                jobs.append({'name': name, 'field': field, 'implement': implement, **nums,
+                             'depends': row.get('depends', '')})
+        for j in jobs:
+            dep = j['depends']
+            if dep and not farm.job_by_id(dep) and dep.lower() not in names:
+                issues.append(f"{j['name']}: depends on \"{dep}\", which is not a job id or a job in this list.")
+        return jobs, issues
+
+
 class MonitorAgent:
     name = 'Monitor'
     def classify(self, event, tractor):
@@ -369,6 +434,7 @@ class AgentMesh:
         self.guard = ConstraintGuard()
         self.memory = MemoryAgent(memory_path)
         self.advisor = AdvisorAgent()
+        self.intake = IntakeAgent()
         self.tractor_agents = {}          # one per tractor, created on first use
         self.timeout = AGENT_TIMEOUT_S
         self.pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix='agent')
@@ -583,7 +649,7 @@ class AgentMesh:
 
     def snapshot(self):
         agents = [self.planner, *self.tractor_agents.values()]
-        return {'roles':['Orchestrator','Monitor','Tractor agents','Planner','Guard','Recovery','Memory','Communicator','Advisor'],
+        return {'roles':['Orchestrator','Intake','Monitor','Tractor agents','Planner','Guard','Recovery','Memory','Communicator','Advisor'],
                 'messages':list(self.messages)[:22],
                 'communication':{'directed_messages':self.sent,'payload_bytes':self.bytes_sent,
                                  'idle_cycles_without_messages':self.skipped_idle},

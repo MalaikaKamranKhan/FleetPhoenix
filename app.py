@@ -271,6 +271,26 @@ class FleetEngine:
                 self.log('success', f"{t['name']} charged to 95% and returned to service.")
                 self.plan()
                 return f'{t["name"]} recharged.'
+            if op == 'submit_jobs':
+                # Operator job list: the Intake agent parses it; any problem rejects the whole list.
+                text = str(payload.get('csv', ''))
+                self.agents.send('Operator', 'Intake', 'joblist.submitted', {'chars': len(text)})
+                parsed, issues = self.agents.intake.parse(self, text)
+                if issues:
+                    self.agents.send('Intake', 'Orchestrator', 'joblist.rejected', {'issues': issues[:3]})
+                    self.log('alert', 'INTAKE FLAGGED the job list and applied nothing (no values were guessed): ' + ' '.join(issues[:3]))
+                    raise ValueError('Job list not accepted. ' + ' '.join(issues[:4]))
+                first = max(int(j['id'][1:]) for j in self.jobs) + 1
+                ids = {j['name'].lower(): f'J{first + k}' for k, j in enumerate(parsed)}
+                for j in parsed:
+                    dep = j['depends']
+                    dep_id = (dep if self.job_by_id(dep) else ids.get(dep.lower())) if dep else None
+                    self.jobs.append(self.job(ids[j['name'].lower()], j['name'], j['field'], j['implement'],
+                                              j['units'], j['deadline'], j['priority'], dep_id))
+                self.agents.send('Intake', 'Orchestrator', 'joblist.parsed', {'jobs': list(ids.values())})
+                self.log('system', f"OPERATOR JOB LIST accepted: {len(parsed)} jobs ({', '.join(ids.values())}). Sent to the tractors for bids.")
+                self.plan()
+                return f"{len(parsed)} jobs added: {', '.join(ids.values())}."
             if op == 'set_reserve':
                 try:
                     reserve = int(payload.get('reserve'))
