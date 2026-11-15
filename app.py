@@ -15,6 +15,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 from agent_mesh import AgentMesh
+from notifier import OwnerNotifier
 
 BASE = Path(__file__).resolve().parent
 PORT = int(os.environ.get('FLEET_PORT', '5000'))
@@ -39,10 +40,34 @@ class FleetEngine:
     IMPLEMENTS = {'plow', 'seed', 'harvest', 'irrigate'}
     FIELDS = {'North Ridge', 'East Orchard', 'West Terrace'}
 
-    def __init__(self):
+    def __init__(self, notifier=None):
         self.lock = threading.RLock()
         self.agents = AgentMesh(self, BASE / 'runtime' / 'agent_memory.jsonl')
+        self.notifier = notifier or OwnerNotifier()   # texts the farm owner on a breakdown
         self.reset()
+
+    def alert_owner(self, tractor, old_job):
+        """Text the owner what broke, what work was saved, and who took over."""
+        if old_job and old_job['assigned']:
+            successor = self.tractor(old_job['assigned'])['name']
+            work = f"{old_job['name']} saved at {old_job['done']}/{old_job['total']} units; {successor} has taken over."
+        elif old_job:
+            work = (f"{old_job['name']} saved at {old_job['done']}/{old_job['total']} units; "
+                    'no compatible tractor is free, so it is queued safely.')
+        else:
+            work = 'It had no active job, so no work was affected.'
+        body = f"FleetPhoenix alert: {tractor['name']} broke down at {tractor['field']} (T+{self.minute}m). {work}"
+
+        def done(record):
+            with self.lock:
+                if record['status'] == 'dry-run':
+                    self.log('system', f"OWNER ALERT (dry run, no SMS sent): {record['body']}")
+                elif record['status'] == 'sent':
+                    self.log('success', f"OWNER ALERT texted to {record['to']}: {record['body']}")
+                else:
+                    self.log('alert', f"OWNER ALERT to {record['to']} not delivered: {record.get('error', 'unknown error')}")
+            self.agents.send('Orchestrator', 'Owner', 'sms.' + record['status'], {'to': record['to']})
+        self.notifier.notify(body, done)
 
     def log(self, kind, message):
         self.serial += 1
@@ -179,6 +204,7 @@ class FleetEngine:
                     self.recoveries += 1
                     if not assigned or old['assigned'] is None:
                         self.log('alert', f"No currently eligible replacement for {old['name']}; unfinished work remains safely queued.")
+                self.alert_owner(t, old)
                 return f'{t["name"]} failed; schedule reviewed.'
             if op == 'delay':
                 if not t or t['status'] not in ('working','idle'):
@@ -298,6 +324,7 @@ class FleetEngine:
             return {
                 'minute': self.minute, 'paused': self.paused, 'tractors': [dict(t) for t in self.tractors],
                 'jobs': jobs, 'events': list(self.events[:24]), 'recoveries': self.recoveries,
+                'owner_alerts': self.notifier.status(),
                 'metrics': {'completed_units': done, 'total_units': total,
                             'percent': round(100 * done / total) if total else 0,
                             'jobs_done': sum(j['status'] == 'completed' for j in jobs),
@@ -434,6 +461,9 @@ def main():
     print(f'  Judge link     : http://{local_ip()}:{PORT}/judge?t={ACCESS_TOKEN}')
     print('  Start simulation from the phone controller or laptop toolbar.')
     print('  Both devices must be on the same reachable Wi-Fi network.')
+    n = engine.notifier
+    print(f'  Owner SMS alerts: texting {n.status()["to"]} on breakdowns' if n.mode == 'twilio'
+          else f'  Owner SMS alerts: DRY RUN (shown in the event log, not sent). {n.reason}')
     print('  Ctrl+C to stop. This is a SIMULATION — never real tractor control.\n')
     ThreadingHTTPServer(('0.0.0.0', PORT), Handler).serve_forever()
 

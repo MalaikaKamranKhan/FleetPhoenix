@@ -71,6 +71,24 @@ Alternatively, set your compatible provider's `https://.../v1/chat/completions` 
 
 The UI shows whether the model is connected, thinking, offline, or errored. If the provider is inaccessible, the deterministic agents continue operating.
 
+## Owner SMS alerts (optional, real text messages)
+
+When a tractor is confirmed broken down, FleetPhoenix texts the farm owner what broke, how much work was saved, and which tractor took over. For example:
+
+> FleetPhoenix alert: Titan 04 broke down at North Ridge (T+6m). Prepare North Ridge saved at 6/24 units; Titan 01 has taken over.
+
+It uses Twilio. Set four variables in the same terminal *before* `py app.py` (PowerShell shown; on macOS use `export NAME=value`):
+
+```powershell
+$env:TWILIO_ACCOUNT_SID = 'AC...'          # from the Twilio console
+$env:TWILIO_AUTH_TOKEN  = '...'            # keep secrets out of source control
+$env:TWILIO_FROM_NUMBER = '+15205550100'   # your Twilio number
+$env:FLEET_OWNER_PHONE  = '+15205550123'   # the owner's phone, +country code
+py app.py
+```
+
+The startup banner says whether alerts are live. Without all four, alerts run in **dry-run mode**: the exact text appears in the event log but nothing is sent. A Twilio trial account can only text phone numbers you have verified in the Twilio console. The owner's number is shown masked (last four digits only). Sending happens in the background, so a slow network never freezes the simulation, and a failed send is logged without affecting recovery. The tests always run in dry-run mode and never send a text.
+
 ## The agents and their actual tools
 
 | Role | Trigger | Tool or outcome |
